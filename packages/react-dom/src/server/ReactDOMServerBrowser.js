@@ -27,8 +27,17 @@ function renderToStaticNodeStream() {
   );
 }
 
+function ReactPartialRenderer() {
+  invariant(
+    false,
+    'ReactDOMServer.ReactPartialRenderer: The server renderer is not available ' +
+    'in the browser.',
+  );
+}
+
 // Note: when changing this, also consider https://github.com/facebook/react/issues/11526
 export default {
+  ReactPartialRenderer,
   renderToString,
   renderToStaticMarkup,
   renderToNodeStream,

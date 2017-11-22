@@ -526,6 +526,32 @@ class ReactDOMServerRenderer {
     this.makeStaticMarkup = makeStaticMarkup;
   }
 
+  renderFrame(): string {
+    var frame: Frame = this.stack[this.stack.length - 1];
+    if (frame.childIndex >= frame.children.length) {
+      var footer = frame.footer;
+      if (footer !== '') {
+        this.previousWasTextNode = false;
+      }
+      this.stack.pop();
+      if (frame.tag === 'select') {
+        this.currentSelectValue = null;
+      }
+      return footer;
+    }
+
+    var child = frame.children[frame.childIndex++];
+    if (__DEV__) {
+      setCurrentDebugStack(this.stack);
+    }
+    var out = this.render(child, frame.context, frame.domNamespace);
+    if (__DEV__) {
+      // TODO: Handle reentrant server render calls. This doesn't.
+      resetCurrentDebugStack();
+    }
+    return out;
+  }
+
   read(bytes: number): string | null {
     if (this.exhausted) {
       return null;
@@ -537,28 +563,7 @@ class ReactDOMServerRenderer {
         this.exhausted = true;
         break;
       }
-      var frame: Frame = this.stack[this.stack.length - 1];
-      if (frame.childIndex >= frame.children.length) {
-        var footer = frame.footer;
-        out += footer;
-        if (footer !== '') {
-          this.previousWasTextNode = false;
-        }
-        this.stack.pop();
-        if (frame.tag === 'select') {
-          this.currentSelectValue = null;
-        }
-        continue;
-      }
-      var child = frame.children[frame.childIndex++];
-      if (__DEV__) {
-        setCurrentDebugStack(this.stack);
-      }
-      out += this.render(child, frame.context, frame.domNamespace);
-      if (__DEV__) {
-        // TODO: Handle reentrant server render calls. This doesn't.
-        resetCurrentDebugStack();
-      }
+      out += this.renderFrame();
     }
     return out;
   }
