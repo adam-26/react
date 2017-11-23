@@ -1,8 +1,6 @@
 import React from 'react';
-import { renderToString, renderToNodeStream } from './cache/ReactDOMServerNode';
-import SimpleTemplateEngine from './cache/templateEngine/SimpleTemplateEngine';
-import InMemoryTemplateCache from './cache/templateCache/InMemoryTemplateCache';
-
+import { renderToString, renderToNodeStream } from './pluginRenderer/ReactDOMServerNode';
+import StaticCachePlugin from './pluginRenderer/plugins/StaticCachePlugin';
 import App from '../src/components/App';
 
 
@@ -17,47 +15,73 @@ if (process.env.NODE_ENV === 'development') {
   assets = require('../build/asset-manifest.json');
 }
 
-const templateEngine = new SimpleTemplateEngine();
-const templateCache = new InMemoryTemplateCache();
+function getMinutes() {
+  return new Date(Date.now()).getMinutes();
+}
+
+const renderOpts = {
+  plugins: [new StaticCachePlugin()]
+};
+
+const renderReq = (description, serve) => {
+  const start = process.hrtime();
+  const out = serve();
+  const end = process.hrtime(start);
+  const nanoseconds = (end[0] * 1e9) + end[1];
+  const milliseconds = nanoseconds / 1e6;
+  console.log(`Render ${description} req: ${milliseconds}ms`);
+  return out;
+};
+
+const streamReq = (description, callback) => {
+  const start = process.hrtime();
+  const onEnd = () => {
+    const end = process.hrtime(start);
+    const nanoseconds = (end[0] * 1e9) + end[1];
+    const milliseconds = nanoseconds / 1e6;
+    console.log(`Stream ${description} req: ${milliseconds}ms`);
+  };
+  callback(onEnd);
+};
 
 export function renderToStringUsingCache() {
-  var html = renderToString(<App assets={assets} />, {
-    templateEngine: templateEngine,
-    cacheProvider: templateCache
+  return renderReq('cache', () => {
+    const html = renderToString(<App minutes={getMinutes()} assets={assets}/>, renderOpts);
+    // There's no way to render a doctype in React so prepend manually.
+    // Also append a bootstrap script tag.
+    return '<!DOCTYPE html>' + html;
   });
-  // There's no way to render a doctype in React so prepend manually.
-  // Also append a bootstrap script tag.
-  return '<!DOCTYPE html>' + html;
 }
 
 export function renderToStreamUsingCache(res) {
-  // res.write("<!DOCTYPE html><html><head><title>SSR Cache</title></head><body>");
-  const stream = renderToNodeStream(<App assets={assets} />, {
-    templateEngine: templateEngine,
-    cacheProvider: templateCache
-  });
+  streamReq('cache', onEnd  => {
+    const stream = renderToNodeStream(<App minutes={getMinutes()} assets={assets}/>, renderOpts);
 
-  stream.pipe(res, { end: false });
-  stream.on('end', () => {
-    // res.write("</body></html>");
-    res.end();
+    stream.pipe(res, {end: false});
+    stream.on('end', () => {
+      res.end();
+      onEnd();
+    });
   });
 }
 
 export function renderToStringNoCache() {
-  var html = renderToString(<App assets={assets} />);
-  // There's no way to render a doctype in React so prepend manually.
-  // Also append a bootstrap script tag.
-  return '<!DOCTYPE html>' + html;
+  return renderReq('raw', () => {
+    var html = renderToString(<App minutes={getMinutes()} assets={assets}/>);
+    // There's no way to render a doctype in React so prepend manually.
+    // Also append a bootstrap script tag.
+    return '<!DOCTYPE html>' + html;
+  });
 }
 
 export function renderToStreamNoCache(res) {
-  // res.write("<!DOCTYPE html><html><head><title>SSR Cache</title></head><body>");
-  const stream = renderToNodeStream(<App assets={assets} />);
+  streamReq('raw', onEnd  => {
+    const stream = renderToNodeStream(<App minutes={getMinutes()} assets={assets}/>);
 
-  stream.pipe(res, { end: false });
-  stream.on('end', () => {
-    // res.write("</body></html>");
-    res.end();
+    stream.pipe(res, {end: false});
+    stream.on('end', () => {
+      res.end();
+      onEnd();
+    });
   });
 }

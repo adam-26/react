@@ -3,4 +3,4 @@ import {hydrate} from 'react-dom';
 
 import App from './components/App';
 
-hydrate(<App assets={window.assetManifest} />, document);
+hydrate(<App minutes={window.__MINUTES} assets={window.assetManifest} />, document);

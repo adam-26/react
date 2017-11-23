@@ -23,6 +23,11 @@ export default class Chrome extends Component {
           {this.props.children}
           <script
             dangerouslySetInnerHTML={{
+              __html: `window.__MINUTES = ${JSON.stringify(this.props.minutes)};`,
+            }}
+          />
+          <script
+            dangerouslySetInnerHTML={{
               __html: `assetManifest = ${JSON.stringify(assets)};`,
             }}
           />
