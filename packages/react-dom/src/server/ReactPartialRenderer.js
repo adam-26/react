@@ -350,23 +350,164 @@ function validateRenderResult(child, type) {
   }
 }
 
-function resolve(
-  child: mixed,
+type Frame = {
+  domNamespace: string,
+  children: FlatReactChildren,
+  childIndex: number,
   context: Object,
-): {|
-  child: mixed,
-  context: Object,
-|} {
-  while (React.isValidElement(child)) {
-    // Safe because we just checked it's an element.
-    var element: ReactElement = ((child: any): ReactElement);
+  footer: string,
+};
+
+type FrameDev = Frame & {
+  debugElementStack: Array<ReactElement>,
+};
+
+class ReactDOMServerRenderer {
+  stack: Array<Frame>;
+  exhausted: boolean;
+  // TODO: type this more strictly:
+  currentSelectValue: any;
+  previousWasTextNode: boolean;
+  makeStaticMarkup: boolean;
+
+  static createFrame(domNamespace: string, children: mixed, context: Object, footer?: string = ''): Frame {
+    const frame: Frame = {
+      domNamespace: domNamespace,
+      children: children,
+      childIndex: 0,
+      context: context,
+      footer: footer,
+    };
     if (__DEV__) {
-      pushElementToDebugStack(element);
+      ((frame: any): FrameDev).debugElementStack = [];
     }
+    return frame;
+  }
+
+  constructor(children: mixed, makeStaticMarkup: boolean) {
+    const flatChildren = flattenTopLevelChildren(children);
+
+    // Assume all trees start in the HTML namespace (not totally true, but
+    // this is what we did historically)
+    this.stack = [ReactDOMServerRenderer.createFrame(Namespaces.html, flatChildren, emptyObject)];
+    this.exhausted = false;
+    this.currentSelectValue = null;
+    this.previousWasTextNode = false;
+    this.makeStaticMarkup = makeStaticMarkup;
+  }
+
+  renderCurrentFrame(): string {
+    var frame: Frame = this.stack[this.stack.length - 1];
+    return this.renderFrame(frame);
+  }
+
+  renderFrame(frame: Frame): string {
+    if (frame.childIndex >= frame.children.length) {
+      var footer = frame.footer;
+      if (footer !== '') {
+        this.previousWasTextNode = false;
+      }
+      this.stack.pop();
+      if (frame.tag === 'select') {
+        this.currentSelectValue = null;
+      }
+      return footer;
+    }
+    var child = frame.children[frame.childIndex++];
+    return this.renderFrameChild(child, frame);
+  }
+
+  renderFrameChild(child: ReactNode | null, frame: Frame): string {
+    if (__DEV__) {
+      setCurrentDebugStack(this.stack);
+    }
+    var out = this.render(child, frame.context, frame.domNamespace);
+    if (__DEV__) {
+      // TODO: Handle reentrant server render calls. This doesn't.
+      resetCurrentDebugStack();
+    }
+    return out;
+  }
+
+  read(bytes: number): string | null {
+    if (this.exhausted) {
+      return null;
+    }
+
+    var out = '';
+    while (out.length < bytes) {
+      if (this.stack.length === 0) {
+        this.exhausted = true;
+        break;
+      }
+      out += this.renderCurrentFrame();
+    }
+    return out;
+  }
+
+  renderText(child: ReactNode): string {
+    var text = '' + child;
+    if (text === '') {
+      return '';
+    }
+    if (this.makeStaticMarkup) {
+      return escapeTextContentForBrowser(text);
+    }
+    if (this.previousWasTextNode) {
+      return '<!-- -->' + escapeTextContentForBrowser(text);
+    }
+    this.previousWasTextNode = true;
+    return escapeTextContentForBrowser(text);
+  }
+
+  renderComponent(
+    nextChild: ReactNode | null,
+    context: Object,
+    parentNamespace: string,
+  ): string {
+    if (nextChild === null || nextChild === false) {
+      return '';
+    } else if (!React.isValidElement(nextChild)) {
+      const nextChildren = toArray(nextChild);
+      this.stack.push(ReactDOMServerRenderer.createFrame(parentNamespace, nextChildren, context));
+      return '';
+    } else if (
+      ((nextChild: any): ReactElement).type === REACT_FRAGMENT_TYPE
+    ) {
+      const nextChildren = toArray(
+        ((nextChild: any): ReactElement).props.children,
+      );
+      this.stack.push(ReactDOMServerRenderer.createFrame(parentNamespace, nextChildren, context));
+      return '';
+    } else {
+      // Safe because we just checked it's an element.
+      var nextElement = ((nextChild: any): ReactElement);
+      return this.renderDOM(nextElement, context, parentNamespace);
+    }
+  }
+
+  render(
+    child: ReactNode | null,
+    context: Object,
+    parentNamespace: string,
+  ): string {
+    if (typeof child === 'string' || typeof child === 'number') {
+      return this.renderText(child);
+    } else {
+      var nextChild;
+      ({child: nextChild, context} = this.resolve(child, context));
+      return this.renderComponent(nextChild, context, parentNamespace);
+    }
+  }
+
+  resolveElement(
+    element: mixed,
+    context: Object,
+  ): {|
+    nextChild: mixed,
+    nextContext: Object,
+  |} {
     var Component = element.type;
-    if (typeof Component !== 'function') {
-      break;
-    }
     var publicContext = processContext(Component, context);
     var inst;
     var queue = [];
@@ -399,9 +540,8 @@ function resolve(
     } else {
       inst = Component(element.props, publicContext, updater);
       if (inst == null || inst.render == null) {
-        child = inst;
-        validateRenderResult(child, Component);
-        continue;
+        validateRenderResult(inst, Component);
+        return {nextChild: inst, nextContext: context};
       }
     }
 
@@ -447,7 +587,7 @@ function resolve(
         queue = null;
       }
     }
-    child = inst.render();
+    var child = inst.render();
 
     if (__DEV__) {
       if (child === undefined && inst.render._isMockFunction) {
@@ -464,7 +604,7 @@ function resolve(
       invariant(
         typeof childContextTypes === 'object',
         '%s.getChildContext(): childContextTypes must be defined in order to ' +
-          'use getChildContext().',
+        'use getChildContext().',
         getComponentName(Component) || 'Unknown',
       );
       childContext = inst.getChildContext();
@@ -480,150 +620,7 @@ function resolve(
     if (childContext) {
       context = Object.assign({}, context, childContext);
     }
-  }
-  return {child, context};
-}
-
-type Frame = {
-  domNamespace: string,
-  children: FlatReactChildren,
-  childIndex: number,
-  context: Object,
-  footer: string,
-};
-
-type FrameDev = Frame & {
-  debugElementStack: Array<ReactElement>,
-};
-
-class ReactDOMServerRenderer {
-  stack: Array<Frame>;
-  exhausted: boolean;
-  // TODO: type this more strictly:
-  currentSelectValue: any;
-  previousWasTextNode: boolean;
-  makeStaticMarkup: boolean;
-
-  constructor(children: mixed, makeStaticMarkup: boolean) {
-    const flatChildren = flattenTopLevelChildren(children);
-
-    var topFrame: Frame = {
-      // Assume all trees start in the HTML namespace (not totally true, but
-      // this is what we did historically)
-      domNamespace: Namespaces.html,
-      children: flatChildren,
-      childIndex: 0,
-      context: emptyObject,
-      footer: '',
-    };
-    if (__DEV__) {
-      ((topFrame: any): FrameDev).debugElementStack = [];
-    }
-    this.stack = [topFrame];
-    this.exhausted = false;
-    this.currentSelectValue = null;
-    this.previousWasTextNode = false;
-    this.makeStaticMarkup = makeStaticMarkup;
-  }
-
-  read(bytes: number): string | null {
-    if (this.exhausted) {
-      return null;
-    }
-
-    var out = '';
-    while (out.length < bytes) {
-      if (this.stack.length === 0) {
-        this.exhausted = true;
-        break;
-      }
-      var frame: Frame = this.stack[this.stack.length - 1];
-      if (frame.childIndex >= frame.children.length) {
-        var footer = frame.footer;
-        out += footer;
-        if (footer !== '') {
-          this.previousWasTextNode = false;
-        }
-        this.stack.pop();
-        if (frame.tag === 'select') {
-          this.currentSelectValue = null;
-        }
-        continue;
-      }
-      var child = frame.children[frame.childIndex++];
-      if (__DEV__) {
-        setCurrentDebugStack(this.stack);
-      }
-      out += this.render(child, frame.context, frame.domNamespace);
-      if (__DEV__) {
-        // TODO: Handle reentrant server render calls. This doesn't.
-        resetCurrentDebugStack();
-      }
-    }
-    return out;
-  }
-
-  render(
-    child: ReactNode | null,
-    context: Object,
-    parentNamespace: string,
-  ): string {
-    if (typeof child === 'string' || typeof child === 'number') {
-      var text = '' + child;
-      if (text === '') {
-        return '';
-      }
-      if (this.makeStaticMarkup) {
-        return escapeTextContentForBrowser(text);
-      }
-      if (this.previousWasTextNode) {
-        return '<!-- -->' + escapeTextContentForBrowser(text);
-      }
-      this.previousWasTextNode = true;
-      return escapeTextContentForBrowser(text);
-    } else {
-      var nextChild;
-      ({child: nextChild, context} = resolve(child, context));
-      if (nextChild === null || nextChild === false) {
-        return '';
-      } else if (!React.isValidElement(nextChild)) {
-        const nextChildren = toArray(nextChild);
-        const frame: Frame = {
-          domNamespace: parentNamespace,
-          children: nextChildren,
-          childIndex: 0,
-          context: context,
-          footer: '',
-        };
-        if (__DEV__) {
-          ((frame: any): FrameDev).debugElementStack = [];
-        }
-        this.stack.push(frame);
-        return '';
-      } else if (
-        ((nextChild: any): ReactElement).type === REACT_FRAGMENT_TYPE
-      ) {
-        const nextChildren = toArray(
-          ((nextChild: any): ReactElement).props.children,
-        );
-        const frame: Frame = {
-          domNamespace: parentNamespace,
-          children: nextChildren,
-          childIndex: 0,
-          context: context,
-          footer: '',
-        };
-        if (__DEV__) {
-          ((frame: any): FrameDev).debugElementStack = [];
-        }
-        this.stack.push(frame);
-        return '';
-      } else {
-        // Safe because we just checked it's an element.
-        var nextElement = ((nextChild: any): ReactElement);
-        return this.renderDOM(nextElement, context, parentNamespace);
-      }
-    }
+    return {nextChild: child, nextContext: context};
   }
 
   renderDOM(
@@ -921,6 +918,27 @@ class ReactDOMServerRenderer {
     this.stack.push(frame);
     this.previousWasTextNode = false;
     return out;
+  }
+
+  resolve(
+    child: mixed,
+    context: Object,
+  ): {|
+    child: mixed,
+    context: Object,
+  |} {
+    while (React.isValidElement(child)) {
+      // Safe because we just checked it's an element.
+      var element: ReactElement = ((child: any): ReactElement);
+      if (__DEV__) {
+        pushElementToDebugStack(element);
+      }
+      if (typeof element.type !== 'function') {
+        break;
+      }
+      ({nextChild: child, nextContext: context} = this.resolveElement(element, context));
+    }
+    return {child, context};
   }
 }
 
