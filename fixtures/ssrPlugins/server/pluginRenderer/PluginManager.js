@@ -1,6 +1,5 @@
 // @flow
-import {FrameBoundaryPlugin, ReactNode, RenderFrame, Frame} from './frameBoundaryTypes';
-import type {SetFrameState} from "./frameBoundaryTypes";
+import {FrameBoundaryPlugin, ReactNode, RenderedFrameBoundary, Frame} from './frameBoundaryTypes';
 
 /**
  * Manages FrameBoundaryPlugins.
@@ -45,7 +44,7 @@ export default class PluginManager {
     element: ReactNode,
     frame: Frame,
     renderUtils: Object
-  ): string {
+  ): RenderedFrameBoundary {
     const { renderElement } = renderUtils;
     if (!this.hasPlugins || pluginNames.length === 0) {
       // render the entire original frame
