@@ -350,17 +350,116 @@ function validateRenderResult(child, type) {
   }
 }
 
+class CacheElement {
+  cacheState: mixed;
+  children: mixed;
+
+  constructor(cacheState: mixed, children: mixed) {
+    this.cacheState = cacheState;
+    this.children = children;
+  }
+}
+
+type CacheRenderUtils = {
+
+  /**
+   * Renders the current frame and all its children, allowing props to be overridden.
+   *
+   * @param props
+   * @param context
+   * @returns {string}
+   */
+  renderCurrentElement: (props?: Object, context?: Object) => string,
+
+  /**
+   * Renders the provided element and all its children.
+   *
+   * @param element
+   * @param context
+   * @param domNamespace
+   * @returns {string}
+   */
+  renderElement: (element: ReactElement, context?: Object, domNamespace?: string) => string,
+
+  /**
+   * Logs a warning if the base context is modified during the provided render function.
+   *
+   * NOTE: This only logs warning messages in development.
+   *
+   * @param baseContext
+   * @param render
+   * @param [messageSuffix] {string} the message to log
+   * @returns {string} the render output
+   */
+  warnIfRenderModifiesContext: (baseContext: Object, render: () => string, messageSuffix?: string) => string,
+};
+
+interface CacheStrategy {
+
+  /**
+   * Gets the cache strategy state for a component.
+   *
+   * @param component
+   * @param props
+   * @param context
+   * @returns {*} if undefined is returned, the cache strategy render method will not be invoked for this component.
+   */
+  getCacheState(component: ReactNode, props: Object, context: Object): any,
+
+  /**
+   * Renders an element using a cache strategy.
+   *
+   * @param element to render
+   * @param context to use for rendering
+   * @param cacheState the state returned by the getCacheState() method
+   * @param renderUtils to simplify rendering of cached component
+   * @returns {string} the rendered component
+   */
+  render(element: ReactElement, context: Object, cacheState: mixed, renderUtils: CacheRenderUtils): string,
+}
+
 type Frame = {
   domNamespace: string,
   children: FlatReactChildren,
   childIndex: number,
   context: Object,
   footer: string,
+  // TODO: === START: Cache Hook ===
+  cacheState: any
+  // TODO: === END: Cache Hook ===
 };
 
 type FrameDev = Frame & {
   debugElementStack: Array<ReactElement>,
 };
+
+const noopRenderStats = {
+  start: (): any => {},
+  end: (state: any): void => {},
+};
+
+function hasContextChanged(baseContext: Object, currentContext: Object): boolean {
+  const previousKeys = Object.keys(baseContext);
+  const currentKeys = Object.keys(currentContext);
+  if (previousKeys.length !== currentKeys.length) {
+    return true;
+  }
+
+  for (let i = 0, len = previousKeys.length; i < len; i++) {
+    if (currentKeys.indexOf(previousKeys[i]) === -1) {
+      return true;
+    }
+  }
+
+  for (let i = 0, len = previousKeys.length; i < len; i++) {
+    const key = previousKeys[i];
+    if (baseContext[key] !== currentContext[key]) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 class ReactDOMServerRenderer {
   stack: Array<Frame>;
@@ -369,6 +468,14 @@ class ReactDOMServerRenderer {
   currentSelectValue: any;
   previousWasTextNode: boolean;
   makeStaticMarkup: boolean;
+
+  // TODO: === START: Cache Hook ===
+  cacheStrategy: CacheStrategy;
+  hasCacheStrategy: boolean;
+  useCacheStrategy: boolean;
+  cacheFrameCounter: number;
+  warnIfRenderModifiesContext: (render: () => string, messageSuffix?: string) => string;
+  // TODO: === END: Cache Hook ===
 
   static createFrame(domNamespace: string, children: mixed, context: Object, footer?: string = ''): Frame {
     const frame: Frame = {
@@ -384,8 +491,13 @@ class ReactDOMServerRenderer {
     return frame;
   }
 
-  constructor(children: mixed, makeStaticMarkup: boolean) {
+  constructor(children: mixed, options: Object = {}) {
     const flatChildren = flattenTopLevelChildren(children);
+    const { makeStaticMarkup, cacheStrategy, renderStats } = Object.assign({
+      makeStaticMarkup: false,
+      cacheStrategy: null,
+      renderStats: noopRenderStats,
+    }, options);
 
     // Assume all trees start in the HTML namespace (not totally true, but
     // this is what we did historically)
@@ -394,14 +506,66 @@ class ReactDOMServerRenderer {
     this.currentSelectValue = null;
     this.previousWasTextNode = false;
     this.makeStaticMarkup = makeStaticMarkup;
+    this.cacheStrategy = cacheStrategy;
+    this.hasCacheStrategy = this.useCacheStrategy = cacheStrategy !== null;
+    this.cacheFrameCounter = 0;
+    this.warnIfRenderModifiesContext = null;
+    this.renderStats = renderStats;
+
+    if (__DEV__) {
+      if (this.hasCacheStrategy) {
+        invariant(
+          typeof cacheStrategy.getCacheState === 'function',
+          "cacheStrategy does not implement 'getCacheState' function.");
+        invariant(
+          typeof cacheStrategy.render === 'function',
+          "cacheStrategy does not implement 'render' function.");
+      }
+    }
+
+    this.getRendererState = this.getRendererState.bind(this);
+    this.setRendererState = this.setRendererState.bind(this);
   }
 
   renderCurrentFrame(): string {
-    var frame: Frame = this.stack[this.stack.length - 1];
-    return this.renderFrame(frame);
+    var frameIdx = this.stack.length - 1;
+    var frame: Frame = this.stack[frameIdx];
+    return this.renderFrame(frame, frameIdx);
   }
 
-  renderFrame(frame: Frame): string {
+  renderClosedFrame(frameIdx: number) {
+    let out = '';
+    while (this.stack.length > frameIdx) {
+      out += this.renderCurrentFrame();
+    }
+
+    return out;
+  }
+
+  getRendererState(): Object {
+    return {
+      previousWasTextNode: this.previousWasTextNode,
+      currentSelectValue: this.currentSelectValue,
+    };
+  }
+
+  setRendererState(frameState: Object): void {
+    const { previousWasTextNode, currentSelectValue } = frameState;
+    this.previousWasTextNode = previousWasTextNode;
+    this.currentSelectValue = currentSelectValue;
+  }
+
+  appendFrame(frame: Frame): void {
+    this.stack.push(frame);
+
+    if (__DEV__) {
+      if (typeof this.warnIfRenderModifiesContext === 'function') {
+        this.warnIfRenderModifiesContext(frame.context);
+      }
+    }
+  }
+
+  renderFrame(frame: Frame, frameIdx: number): string {
     if (frame.childIndex >= frame.children.length) {
       var footer = frame.footer;
       if (footer !== '') {
@@ -411,9 +575,91 @@ class ReactDOMServerRenderer {
       if (frame.tag === 'select') {
         this.currentSelectValue = null;
       }
+      // TODO: === START: Cache Hook ===
+      if (typeof frame.cacheState !== 'undefined') {
+        this.cacheFrameCounter--;
+      }
+      // TODO: === END: Cache Hook ===
       return footer;
     }
     var child = frame.children[frame.childIndex++];
+    // TODO: === START: Cache Hook ===
+    if (frame.childIndex === 1 && typeof frame.cacheState !== 'undefined') {
+      return this.cacheStrategy.render(child, frame.context, frame.cacheState, {
+        getRendererState: this.getRendererState,
+        setRendererState: this.setRendererState,
+
+        /**
+         * Renders the current frame and all its children, allowing props to be overridden.
+         *
+         * @param props
+         * @param context
+         * @returns {string}
+         */
+        renderCurrentElement: (props?: Object = child.props, context?: Object = frame.context) => {
+          // flag to prevent recursive resolver
+          this.useCacheStrategy = false;
+
+          var out = this.renderFrameChild(Object.assign({}, child, {props}), { ...frame, context });
+          out += this.renderClosedFrame(frameIdx);
+
+          // ensure flag is reset
+          if (!this.useCacheStrategy) {
+            this.useCacheStrategy = true;
+          }
+
+          return out;
+        },
+
+        /**
+         * Renders the provided element and all its children.
+         *
+         * @param element
+         * @param context
+         * @param domNamespace
+         * @returns {string}
+         */
+        renderElement: (
+          element: ReactElement,
+          context?: Object = frame.context,
+          domNamespace?: string = frame.domNamespace) => {
+          this.appendFrame(ReactDOMServerRenderer.createFrame(domNamespace, React.Children.toArray(element), context));
+          return this.renderClosedFrame(this.stack.length - 1);
+        },
+
+        /**
+         * Logs a warning if the base context is modified during the provided render function.
+         *
+         * NOTE: This only logs warning messages in development.
+         *
+         * @param baseContext
+         * @param render
+         * @param [messageSuffix] {string} the message to log
+         * @returns {string} the render output
+         */
+        warnIfRenderModifiesContext: (
+          baseContext: Object,
+          render: () => string,
+          messageSuffix?: string = ''
+        ): string => {
+          if (__DEV__) {
+            const previousWarning = this.warnIfRenderModifiesContext;
+            this.warnIfRenderModifiesContext = (currentContext: Object) => {
+              if (hasContextChanged(baseContext, currentContext)) {
+                console.warn('WARNING: ' + messageSuffix);
+              }
+            };
+
+            const out = render(baseContext);
+            this.warnIfRenderModifiesContext = previousWarning;
+            return out;
+          } else {
+            return render(baseContext);
+          }
+        },
+      });
+    }
+    // TODO: === END: Cache Hook ===
     return this.renderFrameChild(child, frame);
   }
 
@@ -434,6 +680,7 @@ class ReactDOMServerRenderer {
       return null;
     }
 
+    var state = this.renderStats.start();
     var out = '';
     while (out.length < bytes) {
       if (this.stack.length === 0) {
@@ -442,6 +689,7 @@ class ReactDOMServerRenderer {
       }
       out += this.renderCurrentFrame();
     }
+    this.renderStats.end(state);
     return out;
   }
 
@@ -467,9 +715,18 @@ class ReactDOMServerRenderer {
   ): string {
     if (nextChild === null || nextChild === false) {
       return '';
+    } else if (nextChild instanceof CacheElement) {
+      // TODO: === START: Cache Hook ===
+      // Special-case, a cache element requires its own frame
+      var cacheFrame = ReactDOMServerRenderer.createFrame(parentNamespace, toArray(nextChild.children), context);
+      cacheFrame.cacheState = nextChild.cacheState;
+      this.cacheFrameCounter++;
+      this.appendFrame(cacheFrame);
+      return '';
+      // TODO: === END: Cache Hook ===
     } else if (!React.isValidElement(nextChild)) {
       const nextChildren = toArray(nextChild);
-      this.stack.push(ReactDOMServerRenderer.createFrame(parentNamespace, nextChildren, context));
+      this.appendFrame(ReactDOMServerRenderer.createFrame(parentNamespace, nextChildren, context));
       return '';
     } else if (
       ((nextChild: any): ReactElement).type === REACT_FRAGMENT_TYPE
@@ -477,7 +734,7 @@ class ReactDOMServerRenderer {
       const nextChildren = toArray(
         ((nextChild: any): ReactElement).props.children,
       );
-      this.stack.push(ReactDOMServerRenderer.createFrame(parentNamespace, nextChildren, context));
+      this.appendFrame(ReactDOMServerRenderer.createFrame(parentNamespace, nextChildren, context));
       return '';
     } else {
       // Safe because we just checked it's an element.
@@ -509,6 +766,25 @@ class ReactDOMServerRenderer {
   |} {
     var Component = element.type;
     var publicContext = processContext(Component, context);
+
+    // TODO: === START: Cache Hook ===
+    if (this.hasCacheStrategy) {
+      if (this.useCacheStrategy) {
+        // .getCacheState() should return undefined if the element does not support caching
+        var cacheState = this.cacheStrategy.getCacheState(Component, element.props, context);
+        if (typeof cacheState !== 'undefined') {
+          return {
+            nextContext: publicContext,
+            nextChild: new CacheElement(cacheState, element),
+          };
+        }
+      } else {
+        // Reset flag
+        this.useCacheStrategy = true;
+      }
+    }
+    // TODO: === END: Cache Hook ===
+
     var inst;
     var queue = [];
     var replace = false;
@@ -874,7 +1150,7 @@ class ReactDOMServerRenderer {
       props,
       namespace,
       this.makeStaticMarkup,
-      this.stack.length === 1,
+      (this.stack.length - this.cacheFrameCounter) === 1,
     );
     var footer = '';
     if (omittedCloseTags.hasOwnProperty(tag)) {
@@ -915,7 +1191,7 @@ class ReactDOMServerRenderer {
     if (__DEV__) {
       ((frame: any): FrameDev).debugElementStack = [];
     }
-    this.stack.push(frame);
+    this.appendFrame(frame);
     this.previousWasTextNode = false;
     return out;
   }
