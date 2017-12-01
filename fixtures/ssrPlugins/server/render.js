@@ -1,12 +1,11 @@
 import React from 'react';
-import { renderToString, renderToNodeStream } from './pluginRenderer/ReactDOMServerNode';
-import TemplateRenderer from './templateRenderer/TemplateRenderer';
+import { renderToString, renderToNodeStream } from 'react-dom/server';
 import CacheTemplatePlugin from '../src/plugins/cacheTemplatePlugin/server/CacheTemplatePlugin';
 import StaticCachePlugin from '../src/plugins/simpleCachePlugin/server/StaticCachePlugin';
 import ComponentCachePlugin from '../src/plugins/componentCachePlugin/server/ComponentCachePlugin';
-import InMemoryCacheProvider from './templateRenderer/cache/InMemoryCacheProvider';
-import App from '../src/components/App';
-import TemplateApp from '../src/components/TemplateApp';
+import App from '../src/components/App';import TemplateApp from '../src/components/TemplateApp';
+import PluginCacheStrategyFactory from './pluginCacheStrategy';
+import CachedComponentRenderer from './cachedComponentRenderer';
 import pkg from '../package.json';
 
 let assets;
@@ -24,13 +23,52 @@ function getMinutes() {
   return new Date(Date.now()).getMinutes();
 }
 
-const staticCachePlugin = new StaticCachePlugin();
-const componentCachePlugin = new ComponentCachePlugin();
-const templateRenderer = new TemplateRenderer(pkg.version, new InMemoryCacheProvider());
+function getEndTime(startTime: mixed): void {
+  const end = process.hrtime(startTime);
+  const nanoseconds = (end[0] * 1e9) + end[1];
+  return nanoseconds / 1e6;
+}
 
-const renderUsingTemplates = (url, renderApp, callback) => {
-  templateRenderer.render(url, renderApp, callback);
+function logEndTime(description: string, startTime: mixed): void {
+  console.log(`[${description}: ${getEndTime(startTime)}ms]`);
+}
+
+const renderStats = {
+  start: (): any => {
+    return process.hrtime();
+  },
+
+  end: (startTime: any): void => {
+    logEndTime('Render.read', startTime);
+  }
 };
+
+const pluginCacheStrategyFactory = new PluginCacheStrategyFactory({
+  plugins: [
+    new StaticCachePlugin(),
+    new ComponentCachePlugin(),
+    new CacheTemplatePlugin()
+  ]
+});
+
+const cacheStatsProvider = {
+  startRender: renderStats.start,
+  endRender: (pluginName: string, cacheKey: string, start: any): void => {
+    logEndTime(`strategy: ${pluginName} - render(${cacheKey})`, start);
+  },
+  cacheHit: (pluginName: string, cacheKey: string): void => {
+    console.log(`cache hit: ${pluginName}.${cacheKey}`);
+  },
+  cacheMiss: (pluginName: string, cacheKey: string, start: any): void => {
+    console.log(`cache miss: ${pluginName}.${cacheKey} - ${getEndTime(start)}ms`);
+  },
+};
+
+const cachedComponentRenderer = new CachedComponentRenderer(
+  pkg.version,
+  pluginCacheStrategyFactory, {
+    cacheStatsProvider: cacheStatsProvider
+  });
 
 const getReqMs = (start) => {
   const end = process.hrtime(start);
@@ -94,14 +132,18 @@ function renderStreamResponse(
   });
 }
 
-function renderWithTemplateCache(req, res, render) {
-  renderUsingTemplates(req.url, (err, templateCtx, done) => {
+function renderWithCacheStrategy(req, res, render) {
+
+  // The cachedComponentProvider could async load all cached components/templates before rendering
+  cachedComponentRenderer.render(req.url, (err, cacheStrategy, done) => {
     if (err) {
-      console.error(err);
-      return res.status(500);
+      return render(err);
     }
 
-    render(undefined, templateCtx, done);
+    render(
+      undefined,
+      cacheStrategy,
+      done);
   }, (err) => {
     if (err) {
       // error writing to cache (HTML response is OK) - just log for prototype
@@ -111,31 +153,46 @@ function renderWithTemplateCache(req, res, render) {
 }
 
 export function renderToStringNoCache(req, res) {
-  renderStringResponse('no-cache', req, res);
+  renderStringResponse('no-cache', req, res, { renderStats });
 }
 
 export function renderToStringUsingCache(req, res) {
-  renderStringResponse('cache', req, res, { plugins: [componentCachePlugin, staticCachePlugin] });
+  renderToStringUsingCacheStrategy('cache', req, res, renderAppToString);
 }
 
 export function renderToStringUsingTemplateCache(req, res) {
-  renderWithTemplateCache(req, res, (err, templateCtx, done) => {
+  renderToStringUsingCacheStrategy('templateCache', req, res, renderTemplateAppToString);
+}
+
+export function renderToStringUsingCacheStrategy(description, req, res, render) {
+  renderWithCacheStrategy(req, res, (err, cacheStrategy, done) => {
+    if (err) {
+      throw err;
+    }
+
     renderStringResponse(
-      'templateCache', req, res, { plugins: [componentCachePlugin, new CacheTemplatePlugin(templateCtx)] }, renderTemplateAppToString, done);
+      description, req, res, { cacheStrategy, renderStats }, render, done);
   });
 }
 
 export function renderToStreamNoCache(req, res) {
-  renderStreamResponse('no-cache', req, res);
+  renderStreamResponse('no-cache', req, res, { renderStats });
 }
 
 export function renderToStreamUsingCache(req, res) {
-  renderStreamResponse('cache', req, res, { plugins: [componentCachePlugin, staticCachePlugin] });
+  renderToStreamUsingCacheStrategy('cache', req, res, renderAppToStream);
 }
 
 export function renderToStreamUsingTemplateCache(req, res) {
-  renderWithTemplateCache(req, res, (err, templateCtx, done) => {
-    renderStreamResponse(
-      'templateCache', req, res, { plugins: [componentCachePlugin, new CacheTemplatePlugin(templateCtx)] }, renderTemplateAppToStream, done);
+  renderToStreamUsingCacheStrategy('templateCache', req, res, renderTemplateAppToStream);
+}
+
+export function renderToStreamUsingCacheStrategy(description, req, res, render) {
+  renderWithCacheStrategy(req, res, (err, cacheStrategy, done) => {
+    if (err) {
+      throw err;
+    }
+
+    renderStreamResponse(description, req, res, { cacheStrategy, renderStats }, render, done);
   });
 }
