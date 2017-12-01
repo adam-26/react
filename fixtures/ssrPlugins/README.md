@@ -2,7 +2,7 @@
 
 > Improve the SSR performance of react with plugins
 
-#### A proof of concept using plugins with react SSR plugins
+#### A _proof of concept_ using plugins with react SSR cache strategy hooks
 
 This proof of concept includes 3 example plugins:
 * simple cache plugin: A `<Cache .../>` component to cache component output
@@ -28,7 +28,9 @@ cd fixtures/ssrPlugins
 yarn
 yarn start:prod
 ```
-**Note: Prod mode is recommended, as in _dev mode_ plugins will not cache any output**
+**Note:** 
+ * Prod mode is recommended, as in _dev mode_ plugins will not cache any output
+ * Prod mode will **not** display _modified context warnings_, for this you need to run in dev mode
 
 The `start` command runs a webpack dev server and a server-side rendering server in development mode with hot reloading.
 

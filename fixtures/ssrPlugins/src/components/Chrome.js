@@ -3,6 +3,28 @@ import React, {Component} from 'react';
 import './Chrome.css';
 import PageLinks from './PageLinks';
 
+import PropTypes from 'prop-types';
+
+// used to test triggering the render template context changed warning
+class ContextChanger extends Component {
+
+  static childContextTypes = {
+    test: PropTypes.string
+  };
+
+  getChildContext() {
+    return {
+      test: 'value'
+    }
+  }
+
+  render() {
+    return this.props.children;
+  }
+
+}
+
+
 export default class Chrome extends Component {
   render() {
     const assets = this.props.assets;
@@ -22,7 +44,9 @@ export default class Chrome extends Component {
             }}
           />
           <PageLinks />
-          {this.props.children}
+          <ContextChanger>
+            {this.props.children}
+          </ContextChanger>
           <script
             dangerouslySetInnerHTML={{
               __html: `window.__MINUTES = ${JSON.stringify(this.props.minutes)};`,

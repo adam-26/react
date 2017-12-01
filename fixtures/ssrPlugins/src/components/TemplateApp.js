@@ -1,7 +1,6 @@
 // @flow
 import React, {Component} from 'react';
 import PropTypes from 'prop-types';
-
 import Chrome from './Chrome';
 import Page from './Page';
 import CacheTemplate from '../plugins/cacheTemplatePlugin/components/CacheTemplate';
@@ -23,7 +22,7 @@ export default class TemplateApp extends Component {
       minutes: minutes,
       name: name
     };
-    const pageKeyFunc = (componentName, {name, minutes}) => `${componentName}:${name}:${minutes}`;
+    const pageKeyFunc = ({name, minutes}) => `${name}:${minutes}`;
 
     // The 'injectedProps' are comprised of dynamic content to be injected into the template
     // Injected props can also use <Template>s and other plugins
@@ -35,11 +34,11 @@ export default class TemplateApp extends Component {
         templateProps={pageProps} />
     };
 
-    // The 'Chrome' component apperas the the same every minute (in this example)
+    // The 'Chrome' component appears the the same every minute (in this example)
     // - using the componentName and 'minute' prop as the cacheKey, the <Chrome /> only
     //   needs to be rendered ONCE per minute
     // - all following requests will used the cached Chrome html when rendering the response on the server
-    const cacheKeyFunc = (componentName, {minutes}) => `${componentName}:${minutes}`;
+    const cacheKeyFunc = ({minutes}) => `${minutes}`;
     const templateProps = {
       title: "Hello World",
       minutes: minutes,

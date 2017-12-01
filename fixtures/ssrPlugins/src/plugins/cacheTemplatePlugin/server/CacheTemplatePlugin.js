@@ -1,10 +1,9 @@
 // @flow
-import CacheTemplate from '../components/CacheTemplate';
-import TemplatePlugin from '../../../../server/templateRenderer/TemplatePlugin';
-import { ReactNode } from '../../../../server/pluginRenderer/frameBoundaryTypes';
-import TemplateContext from '../../../../server/templateRenderer/TemplateContext';
-import getDisplayName from 'react-display-name';
-import type { RenderedFrameBoundary } from '../../../../server/pluginRenderer/frameBoundaryTypes';
+import React from 'react';
+import CacheTemplate, { renderPlaceholders } from '../components/CacheTemplate';
+// import getDisplayName from 'react-display-name';
+
+import type { CacheStrategyPlugin } from '../../../../server/pluginCacheStrategy/flowTypes';
 
 /**
  * A plugin that caches <CacheTemplate /> component output as a template, and allows for content
@@ -17,72 +16,85 @@ import type { RenderedFrameBoundary } from '../../../../server/pluginRenderer/fr
  * NOTE: This is only a proof of concept, tokenization is not safe/thorough
  *       Look at https://github.com/electrode-io/electrode-react-ssr-caching for a real tokenizer implementation
  */
-export default class CacheTemplatePlugin extends TemplatePlugin {
+export default class CacheTemplatePlugin implements CacheStrategyPlugin {
 
-  constructor(templateContext: TemplateContext) {
-    super('cacheTemplate_plugin', templateContext);
+  /**
+   * Cache strategy name getter
+   */
+  get cacheStrategyName(): string {
+    return 'cacheTemplate_plugin';
   }
 
-  isFrameBoundary(component: mixed, props: Object, context: Object): boolean {
+  /**
+   * Determine if a component supports SSR cache
+   */
+  canCacheComponent(component: any, props: Object, context: Object): boolean {
     return component === CacheTemplate;
   }
 
-  tokenizeProps(props: Object): Object {
-    const tokens = {};
-    Object.keys(props).forEach((propName, idx) => {
-      tokens[propName] = `@${idx}@`;
-    });
-
-    return tokens;
+  /**
+   * Get a cacheKey for the component with assigned props/context
+   */
+  getCacheKey(componentName: string, component: mixed, props: Object, context: Object): string {
+    const { cacheKey, templateProps } = props;
+    return `${cacheKey(templateProps, context)}:${componentName}`;
   }
 
-  renderFrameBoundary(
-    element: ReactNode,
-    context: Object,
-    domNamespace: string,
-    renderUtils: Object
-  ): RenderedFrameBoundary {
+  /**
+   * Render an element for insertion into the cache
+   */
+  renderForCache(element: ReactElement, context: Object, renderUtils: RenderUtils): mixed {
+    const { renderCurrentElement, warnIfRenderModifiesContext } = renderUtils;
+    const { injectedProps } = element.props;
+
+    const sortedPropNames = CacheTemplate.getSortedInjectedProps(injectedProps);
+
+    // Renders the component as a template, replacing an injected content with placeholders
+    const renderTemplate = (): string => {
+      renderPlaceholders(true);
+      const html = renderCurrentElement(Object.assign({}, {
+        ...element.props,
+        sortedInjectedPropNames: sortedPropNames }));
+      renderPlaceholders(false);
+      return html;
+    };
+
+    // Render and tokenize the element
+    const html = sortedPropNames.length ?
+      warnIfRenderModifiesContext(
+        context,
+        (/*ctx*/) => renderTemplate(),
+        'The context was modified when rendering a template. This may result in inconsistent server/client renders when injecting content into cached templates, resolve this by applying all context changes outside of the <Template> component.') :
+      renderTemplate();
+
+    return {
+      html: CacheTemplate.tokenize(html),
+      tokens: sortedPropNames,
+    };
+  }
+
+  /**
+   * Render a component using the cached component data
+   * A simple cache strategy implementation would simply return the cachedData string in this method
+   */
+  renderFromCache(cachedData: mixed, props: Object, context: Object, renderUtils: RenderUtils): string {
+    const { tokens, html } = cachedData;
+    const { injectedProps } = props;
     const { renderElement } = renderUtils;
-
-    // tokenize
-    const { props: { component, cacheKey, templateProps, injectedProps } } = element;
-    const cacheKeyValue = this.getTemplateKey(cacheKey(getDisplayName(component), templateProps, context));
-    let cacheTemplate = this.getTemplate(cacheKeyValue);
-
-    if (typeof cacheTemplate === 'undefined') {
-      this.logCacheMiss(cacheKeyValue);
-      const tokens = this.tokenizeProps(injectedProps);
-
-      const templateElement = Object.assign({}, element, {
-        type: component,
-        props: Object.assign({}, templateProps, tokens),
-      });
-
-      // Render a tokenized frame
-      cacheTemplate = this.addTemplate(
-        cacheKeyValue,
-        tokens,
-        renderElement(templateElement, context, domNamespace));
-    }
-    else {
-      this.logCacheHit(cacheKeyValue);
-    }
-
-    const { tokens, tokenizedFrame: { html, previousWasTextNode, currentSelectValue }} = cacheTemplate;
-    let out = html;
 
     // TODO: In __DEV__ verify that all 'injectedProps' were previously tokenized - warn if any props missing.
 
-    // Resolve the injected props, and inject them into the template
-    Object
-      .keys(injectedProps)
-      .forEach(propName => {
-        // TODO: May need to 'setFrameState' here before rendering each injected prop ???
-        // TODO: Add support for injecting any type, currently only react components are supported
-        const { html } = renderElement(injectedProps[propName], context, domNamespace);
-        out = out.replace(tokens[propName], html);
-      });
+    let out = '';
+    for (let i = 0, len = html.length; i < len; i++) {
 
-    return { html: out, previousWasTextNode, currentSelectValue };
+      // TODO: Is there a way to 'setRendererState' after injecting each placeholder? Is it even required? Probably NOT!
+
+      const htmlEntry = html[i];
+      out += (typeof htmlEntry === 'number') ?
+        renderElement(injectedProps[tokens[htmlEntry]], context) :
+        htmlEntry;
+    }
+
+    return out;
   }
 }

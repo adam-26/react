@@ -1,6 +1,5 @@
 // @flow
-import RendererPlugin from '../../../../server/pluginRenderer/RendererPlugin';
-import type { ReactNode, RenderedFrameBoundary } from '../../../../server/pluginRenderer/frameBoundaryTypes';
+import type {CacheStrategyPlugin} from "../../../../server/pluginCacheStrategy/flowTypes";
 
 /**
  * Plugin that inspects components for a static 'getCacheKey' function,
@@ -8,42 +7,42 @@ import type { ReactNode, RenderedFrameBoundary } from '../../../../server/plugin
  *
  * This plugin uses a simple cache, and does not use the templateRenderer to provide a template context.
  */
-export default class ComponentCachePlugin extends RendererPlugin {
-  _cache: Object;
+export default class ComponentCachePlugin implements CacheStrategyPlugin {
 
-  constructor() {
-    super('component_cache_example_plugin');
-    this._cache = {};
+  /**
+   * Cache strategy name getter
+   */
+  get cacheStrategyName(): string {
+    return 'component_cache_plugin';
   }
 
-  isFrameBoundary(component: mixed, props: Object, context: Object): boolean {
-    return typeof component.getCacheKey === 'function';
+  /**
+   * Determine if a component supports SSR cache
+   */
+  canCacheComponent(component: any, props: Object, context: Object): boolean {
+    return component && typeof component.getCacheKey === 'function';
   }
 
-  renderFrameBoundary(
-    element: ReactNode,
-    context: Object,
-    domNamespace: string,
-    renderUtils: Object
-  ): RenderedFrameBoundary {
-    const { renderElement, resolveFrameBoundaryChild } = renderUtils;
+  /**
+   * Get a cacheKey for the component with assigned props/context
+   */
+  getCacheKey(componentName: string, component: mixed, props: Object, context: Object): string {
+    return `${component.getCacheKey(props, context)}:${componentName}`;
+  }
 
-    const Component = element.type;
-    const cacheKey = Component.getCacheKey(element.props, context, domNamespace);
-    let cachedFrame = this._cache[cacheKey];
+  /**
+   * Render an element for insertion into the cache
+   */
+  renderForCache(element: ReactElement, context: Object, renderUtils: RenderUtils): mixed {
+    const { renderCurrentElement } = renderUtils;
+    return renderCurrentElement();
+  }
 
-    if (typeof cachedFrame === 'undefined') {
-      this.log(`Cache miss: ${cacheKey}`);
-
-      // Resolve the immediate child component then render the frame.
-      const {nextChild, nextContext} = resolveFrameBoundaryChild(element, context);
-      cachedFrame = renderElement(nextChild, nextContext, domNamespace);
-      this._cache[cacheKey] = Object.assign({}, cachedFrame);
-    }
-    else {
-      this.log(`Cache hit: ${cacheKey}`);
-    }
-
-    return cachedFrame;
+  /**
+   * Render a component using the cached component data
+   * A simple cache strategy implementation would simply return the cachedData string in this method
+   */
+  renderFromCache(cachedData: mixed, props: Object, context: Object, renderUtils: RenderUtils): string {
+    return cachedData;
   }
 }
